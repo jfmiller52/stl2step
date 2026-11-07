@@ -5,7 +5,7 @@ version = 1
 path = [ 
     "stl2step/*.py",
     "stl2step/gui/*.py",
-    "packaging/*.py",
+    "pyinstaller_entry/*.py",
     "tests/*.py",
     ".github/**",
     "experiments/**"

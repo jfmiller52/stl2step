@@ -69,7 +69,7 @@ def _keep(entry_name: str) -> bool:
 
 
 a = Analysis(
-    [str(ROOT / "packaging" / "run_gui.py")],
+    [str(ROOT / "pyinstaller_entry" / "run_gui.py")],
     pathex=[str(ROOT)],
     binaries=binaries,
     datas=datas,
