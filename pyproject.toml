@@ -1,0 +1,40 @@
+# SPDX-FileCopyrightText: 2025 Stefan Helmert <stefan@entroserv.de>
+#
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+[tool.poetry]
+name = "stl2step"
+version = "0.0.0+devel"
+description = "Non-trivial conversion of STL files into STEP files."
+authors = ["Stefan Helmert <stefan@entroserv.de>"]
+license = "AGPLv3"
+readme = "README.md"
+
+[tool.poetry.dependencies]
+# CadQuery / OCP wheels are reliably available for 3.10–3.12 on macOS arm64.
+python = ">=3.10,<3.13"
+numpy = ">=1.23.5"
+numpy-stl = ">=3.1.1"
+cadquery = ">=2.4.0"
+PyQt6 = ">=6.6.0"
+pyvista = ">=0.43.0"
+pyvistaqt = ">=0.11.0"
+
+[tool.poetry.scripts]
+stl2step = "stl2step.__main__:main"
+stl2step-gui = "stl2step.gui.__main__:main"
+
+[tool.poetry.group.dev.dependencies]
+pylint = "^3.2.6"
+black = "^24.4.2"
+isort = "^5.13.2"
+pytest = "^8.3.2"
+reuse = "^5.0.2"
+pyinstaller = ">=6.0.0"
+
+[tool.isort]
+line_length = 79
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"

@@ -1,0 +1,331 @@
+# SPDX-FileCopyrightText: 2025 Stefan Helmert <stefan@entroserv.de>
+#
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+"""STL to STEP conversion with optional progress / log callbacks."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Callable, Optional
+
+import cadquery as cq
+import numpy as np
+from stl import mesh
+
+LogCallback = Callable[[str], None]
+ProgressCallback = Callable[[int, int], None]
+
+TOTAL_STAGES = 5
+
+
+@dataclass
+class ConvertStats:
+    triangles: int
+    planes: int
+    remaining_triangles: int
+    output_path: str
+
+
+def roundvec(x):
+    return np.round(x * 1000000.0) / 1000000.0
+
+
+def read_stl(filename: str):
+    input_mesh = mesh.Mesh.from_file(filename)
+    return np.array([[roundvec(f) for f in e] for e in input_mesh.vectors])
+
+
+def merge_poly(face_idx_lst, face_idx2edge_idx_lst):
+    edge_idx_set = set()
+    for f in face_idx_lst:
+        for e in face_idx2edge_idx_lst[f]:
+            if e not in edge_idx_set:
+                edge_idx_set.add(e)
+            else:
+                edge_idx_set.remove(e)
+    return edge_idx_set
+
+
+def cluster_planes(faces_arr):
+    a = faces_arr[:, 0, :]
+    b = faces_arr[:, 1, :]
+    c = faces_arr[:, 2, :]
+    ab = b - a
+    ac = c - a
+    nrm = np.cross(ab, ac)
+    nrm2 = nrm / np.linalg.norm(nrm, axis=1)[:, np.newaxis]
+    dist = np.einsum("ij,ij->i", a, nrm2)
+    v = roundvec(np.column_stack((nrm2, dist)))
+    clust = {(e[0], e[1], e[2], e[3]): [] for e in v}
+    for i, e in enumerate(v):
+        if np.isnan(e[0]):
+            continue
+        clust[(e[0], e[1], e[2], e[3])].append(i)
+    # remove all planes with a single triangle only
+    filtered = {k: v for k, v in clust.items() if len(v) > 1}
+    return list(filtered.values())
+
+
+def sort_edges(edges_merged):
+    i = 0
+    sorted_edges = []
+    first_last = 0
+    while True:
+        current_edge = edges_merged.pop(i)
+        sorted_edges.append(current_edge)
+        current_pnt = current_edge[first_last]
+        for i, e in enumerate(edges_merged):
+            if current_pnt in e:
+                first_last = 1 if e[0] == current_pnt else 0
+                break
+        else:
+            break
+    return sorted_edges
+
+
+def match_points_of_faces(faces):
+    pnt2face_idx_lst = {(f[0], f[1], f[2]): [] for e in faces for f in e}
+    for i, e in enumerate(faces):
+        for f in e:
+            pnt2face_idx_lst[(f[0], f[1], f[2])].append(i)
+    return list(pnt2face_idx_lst.keys()), list(pnt2face_idx_lst.values())
+
+
+def invert_relation(relation, number_of_bins):
+    inv_rel = [[] for i in range(number_of_bins)]
+    for i, r in enumerate(relation):
+        for e in r:
+            inv_rel[e].append(i)
+    return inv_rel
+
+
+def find_edges_of_faces(face_idx2pnt_idx_lst):
+    edge2faces_idx = {}
+    for j, f in enumerate(face_idx2pnt_idx_lst):
+        for i in range(len(f)):
+            if f[i - 1] < f[i]:
+                edge = (f[i - 1], f[i])
+            elif f[i - 1] > f[i]:
+                edge = (f[i], f[i - 1])
+            else:
+                continue
+
+            if edge not in edge2faces_idx:
+                edge2faces_idx[edge] = []
+            edge2faces_idx[edge].append(j)
+    return list(edge2faces_idx.keys()), list(edge2faces_idx.values())
+
+
+def find_edges_of_polygons(polygons):
+    edge2polygon_idx = {}
+    for j, p in enumerate(polygons):
+        for i in range(len(p)):
+            edge = (p[i - 1], p[i])
+            if edge not in edge2polygon_idx:
+                edge2polygon_idx[edge] = []
+            edge2 = (p[i], p[i - 1])
+            if edge2 not in edge2polygon_idx:
+                edge2polygon_idx[edge2] = []
+            edge2polygon_idx[edge].append(j)
+    return edge2polygon_idx
+
+
+def merge_faces(faces_lst, face_idx2edge_idx_list, edge_idx2edge):
+    edges_idx_merged_list = [
+        list(merge_poly(f, face_idx2edge_idx_list)) for f in faces_lst
+    ]
+    edges_merged_list = [
+        [edge_idx2edge[e] for e in edges_idx_merged]
+        for edges_idx_merged in edges_idx_merged_list
+    ]
+    planes = []
+    for edges_merged in edges_merged_list:
+        sorted_edges_polygons = []
+        while len(edges_merged) > 0:
+            sorted_edges = sort_edges(edges_merged)
+            sorted_edges_polygons.append(sorted_edges)
+        planes.append(sorted_edges_polygons)
+    planes_polygons_pts_idx = [
+        [
+            [
+                (set(sorted_edges[i - 1]).intersection(set(sorted_edges[i]))).pop()
+                for i in range(len(sorted_edges))
+            ]
+            for sorted_edges in sorted_edges_polygons
+        ]
+        for sorted_edges_polygons in planes
+    ]
+    return planes_polygons_pts_idx
+
+
+def get_unclassified_faces(all_faces, classified_faces_lst):
+    classified_faces = [f for m in classified_faces_lst for f in m]
+    unclassified_faces = [
+        e for i, e in enumerate(all_faces) if i not in classified_faces
+    ]
+    return unclassified_faces
+
+
+def make_cq_poly_wire(poly_coords):
+    wire = cq.Wire.makePolygon(
+        [[c for c in poly_coords[i - 1]] for i in range(len(poly_coords))], close=True
+    )
+    return wire
+
+
+# Thanks to CadQuery and OCCT: It works even with messed up outer <-> inner Wire. Even,
+# if there are multiple outer wire (multiple polygons), it works, if they are
+# fed to the inner Wires argument. The function definition shows, outer and
+# inner Wire are just concatened to one list being analyzed and corrected by CadQuery or OCCT later.
+#
+# The orientation (concave or convex) of the faces doesn't need to be correct.
+# It is also corrected by CadQuery of OCCT.
+def make_cq_poly_faces(poly_coords):
+    return [
+        cq.Face.makeFromWires(
+            make_cq_poly_wire(e[0]), [make_cq_poly_wire(f) for f in e[1:]]
+        )
+        for e in poly_coords
+    ]
+
+
+def count_len(lst):
+    return np.unique(np.array([len(e) for e in lst]), return_counts=True)
+
+
+def get_2triangle_pacthes(edge_idx2faces_idx, faces):
+    return np.array(
+        [
+            list(
+                set(
+                    [
+                        (p[0], p[1], p[2])
+                        for p in np.concatenate([faces[e[0]], faces[e[1]]])
+                    ]
+                )
+            )
+            for e in edge_idx2faces_idx
+        ]
+    )
+
+
+def calc_circumsphere_center(four_pnts):
+    M = np.vstack(
+        [
+            four_pnts[1] - four_pnts[0],
+            four_pnts[2] - four_pnts[0],
+            four_pnts[3] - four_pnts[0],
+        ]
+    )
+    if np.abs(np.linalg.det(M)) < 1e-10:
+        return np.array([np.nan] * 4)
+    r_vec = 0.5 * np.array(
+        [
+            np.dot(four_pnts[1] - four_pnts[0], four_pnts[1] + four_pnts[0]),
+            np.dot(four_pnts[2] - four_pnts[0], four_pnts[2] + four_pnts[0]),
+            np.dot(four_pnts[3] - four_pnts[0], four_pnts[3] + four_pnts[0]),
+        ]
+    )
+    c = np.linalg.solve(M, r_vec)
+    r = np.linalg.norm(c - four_pnts[0])
+    return np.array([c[0], c[1], c[2], r])
+
+
+def _emit(
+    on_log: Optional[LogCallback],
+    on_progress: Optional[ProgressCallback],
+    stage: int,
+    message: str,
+) -> None:
+    if on_progress is not None:
+        on_progress(stage, TOTAL_STAGES)
+    if on_log is not None:
+        on_log(message)
+
+
+def default_output_path(input_path: str) -> str:
+    path = Path(input_path)
+    return str(path.with_suffix(".step"))
+
+
+def convert_stl_to_step(
+    input_path: str,
+    output_path: Optional[str] = None,
+    *,
+    on_log: Optional[LogCallback] = None,
+    on_progress: Optional[ProgressCallback] = None,
+) -> ConvertStats:
+    """Convert an STL file into a segmented STEP shell.
+
+    Progress stages (1..TOTAL_STAGES): Reading, Preparing, Clustering planes,
+    Building shell, Writing STEP.
+    """
+    if output_path is None:
+        output_path = default_output_path(input_path)
+
+    _emit(on_log, on_progress, 1, f"Reading file: {input_path}")
+    faces = read_stl(input_path)
+    _emit(on_log, on_progress, 1, f"Number of input triangles: {len(faces):13d}")
+
+    _emit(on_log, on_progress, 2, "Preparing mesh topology")
+    number_of_faces = faces.shape[0]
+    pnts, pnt_idx2face_idx_lst = match_points_of_faces(faces)
+    face_idx2pnt_idx_lst = invert_relation(pnt_idx2face_idx_lst, number_of_faces)
+    edge_idx2edge, edge_idx2faces_idx = find_edges_of_faces(face_idx2pnt_idx_lst)
+    face_idx2edge_idx_list = invert_relation(edge_idx2faces_idx, number_of_faces)
+
+    # Reserved for future sphere / cylinder heuristics (upstream experimental).
+    edge_idx24pnts = get_2triangle_pacthes(edge_idx2faces_idx, faces)
+    _ = [calc_circumsphere_center(e) for e in edge_idx24pnts]
+
+    _emit(on_log, on_progress, 3, "Clustering planes")
+    faces_to_be_merged_list = cluster_planes(faces)
+    _emit(
+        on_log,
+        on_progress,
+        3,
+        f"Number of planes found: {len(faces_to_be_merged_list):16d}",
+    )
+
+    polygons_pts_idx = merge_faces(
+        faces_to_be_merged_list, face_idx2edge_idx_list, edge_idx2edge
+    )
+    unique, counts = count_len(polygons_pts_idx)
+    for i, c in enumerate(unique):
+        _emit(
+            on_log,
+            on_progress,
+            3,
+            f"  with {c:6d} polygon{'s:' if c != 1 else ': '} {counts[i]:16d}",
+        )
+
+    remaining_faces = get_unclassified_faces(
+        face_idx2pnt_idx_lst, faces_to_be_merged_list
+    )
+    _emit(
+        on_log,
+        on_progress,
+        3,
+        f"Number of remaining triangles: {len(remaining_faces):9d}",
+    )
+
+    _emit(on_log, on_progress, 4, "Building shell")
+    all_polygons = polygons_pts_idx + [[e] for e in remaining_faces]
+    all_poly_coord = [
+        [[pnts[pnt] for pnt in poly] for poly in plane] for plane in all_polygons
+    ]
+    cq_plane_faces = make_cq_poly_faces(all_poly_coord)
+    shell = cq.Shell.makeShell(cq_plane_faces)
+
+    _emit(on_log, on_progress, 5, f"Writing file: {output_path}")
+    cq.exporters.export(shell, output_path)
+    _emit(on_log, on_progress, 5, "Done.")
+
+    return ConvertStats(
+        triangles=len(faces),
+        planes=len(faces_to_be_merged_list),
+        remaining_triangles=len(remaining_faces),
+        output_path=output_path,
+    )

@@ -1,0 +1,5 @@
+# SPDX-FileCopyrightText: 2025 stl2step contributors
+#
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+"""PyQt6 GUI for stl2step."""
