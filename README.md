@@ -1,80 +1,124 @@
 <!--
 SPDX-FileCopyrightText: 2025 Stefan Helmert <stefan@entroserv.de>
+SPDX-FileCopyrightText: 2025 stl2step contributors
 
 SPDX-License-Identifier: AGPL-3.0-or-later
 -->
 
-# Intelligent conversion from STL to STEP
+# stl2step
 
-This cli program converts STL files into STEP file in a non-trivial way. It segments the mesh into basic shapes. That means, the generated STEP file isn't only a bunch of triangles, it has planes, cylinders, spheres etc. resulting in less memory usage and it is friendlier to CAD and CAM. 
+*Intelligent STL → STEP conversion with a PyQt6 desktop GUI*
 
-Experimental state: Only planes are implemented! Holes __are__ supported now!
+[![CI](https://img.shields.io/github/actions/workflow/status/jfmiller52/stl2step/python-test.yml?style=flat-square)](https://github.com/jfmiller52/stl2step/actions)
+[![Python](https://img.shields.io/badge/Python-3.10%E2%80%933.12-3776ab?style=flat-square)](https://www.python.org/)
+[![License](https://img.shields.io/badge/License-AGPL%20v3-blue?style=flat-square)](LICENSE)
 
-![screenshot of the output step file imported into FreeCAD and the conversion log](example_step.png)
+[Features](#features) • [Getting started](#getting-started) • [CLI](#cli) • [GUI](#gui) • [Binary build](#binary-build) • [How it works](#how-it-works)
 
+Converts triangle meshes into CAD-friendly STEP shells by clustering coplanar facets into real planes (with hole support), instead of dumping every triangle as a face. Smaller files, cleaner imports into CAD/CAM.
 
-## Installation
+![STEP result in FreeCAD with conversion log](example_step.png)
+
+> [!IMPORTANT]
+> Experimental: **planes** (including holes) are implemented. Cylinders, spheres, and other primitives are not yet.
+
+## Features
+
+- **Plane segmentation** — merges coplanar triangles into planar faces; leftover triangles stay as facets
+- **Holes** — inner wires on plane faces are preserved through CadQuery / OCCT
+- **CLI** — `python -m stl2step file.stl` writes `file.step`
+- **Desktop GUI** — PyQt6 + PyVista preview (STL / STEP / Split), progress log, folder batch convert
+- **Library API** — `convert_stl_to_step(..., on_log=, on_progress=)` for embedding
+- **One-file binary** — optional PyInstaller build for the GUI
+
+## Getting started
+
+**Requirements:** Python **3.10–3.12** (3.11 recommended on Apple Silicon). CadQuery / OCP wheels are required.
+
+### Install from source
 
 ```bash
-pip3 install stl2step
+git clone https://github.com/jfmiller52/stl2step.git
+cd stl2step
+python3.11 -m venv .venv
+source .venv/bin/activate   # Windows: .venv\Scripts\activate
+pip install -e .
 ```
 
-## Usage
-
-```bash
-python3 -m stl2step myfile.stl
-```
-
-The out file is named similar to the input file: `myfile.step`, because it only replaces `.stl` with `.step`.
-
-## GUI
-
-A PyQt6 desktop UI is included for interactive conversion with a 3D preview (PyVista).
-
-Requires **Python 3.10–3.12** (CadQuery / OCP wheels; 3.11 recommended on Apple Silicon).
-
-From a Poetry checkout:
+With Poetry:
 
 ```bash
 poetry env use python3.11
 poetry install
-poetry run python -m stl2step.gui
-# or
-poetry run stl2step-gui
 ```
 
-Alternatively with a venv:
+> [!NOTE]
+> PyPI still ships the original CLI package (`pip install stl2step`). For the GUI and current conversion API, use this repository checkout.
+
+## CLI
 
 ```bash
-python3.11 -m venv .venv
-source .venv/bin/activate
-pip install -e .
-python -m stl2step.gui
+python -m stl2step myfile.stl
+# optional explicit output:
+python -m stl2step myfile.stl out/myfile.step
 ```
 
-- Open an STL, preview it, convert to STEP, then inspect the tessellated result (STL / STEP / Split views).
-- **File → Convert folder…** batch-converts every `.stl` in a folder into a chosen output directory.
-- CadQuery / OCCT remains required for conversion and STEP preview.
+By default the output path replaces the `.stl` suffix with `.step`.
 
-### Single binary
+```bash
+# Poetry
+poetry run stl2step myfile.stl
 
-Build a one-file GUI executable with PyInstaller (large; bundles CadQuery / VTK / Qt):
+# tests (needs CadQuery)
+pytest tests/
+```
+
+## GUI
+
+Preview-dominant desktop app: large 3D viewport, file paths / Convert / progress / log on the right.
+
+```bash
+python -m stl2step.gui
+# or
+stl2step-gui
+```
+
+| Action | What it does |
+|--------|----------------|
+| **Open STL** | Loads the mesh into the viewer |
+| **Convert** | Runs plane segmentation and writes STEP |
+| **STL / STEP / Split** | Switch preview modes (STEP is tessellated for display) |
+| **File → Convert folder…** | Batch-converts every `.stl` in a folder |
+
+> [!TIP]
+> Do not name a project folder or package `packaging` next to the repo root — it shadows PyPI’s `packaging` and breaks PyVista imports.
+
+## Binary build
+
+Bundle the GUI into a single executable (large: Qt + VTK + CadQuery):
 
 ```bash
 pip install pyinstaller   # or: poetry install --with dev
 pyinstaller stl2step-gui.spec --noconfirm --clean
-# result: dist/stl2step-gui
+# → dist/stl2step-gui
 ```
 
-On macOS the first launch may be slow while the archive unpacks. Unsigned builds may need Gatekeeper approval (`xattr -dr com.apple.quarantine dist/stl2step-gui`).
+On macOS the first launch unpacks slowly. For unsigned builds:
 
-## Autor
+```bash
+xattr -d com.apple.quarantine dist/stl2step-gui
+```
 
-Stefan Helmert <stefan@entroserv.de>
+## How it works
 
-## License
+```text
+STL triangles
+    → cluster coplanar faces (planes + holes)
+    → keep unclassified triangles
+    → CadQuery shell
+    → STEP export
+```
 
-AGPL v3
+Core entry point: [`stl2step/convert.py`](stl2step/convert.py). GUI lives under [`stl2step/gui/`](stl2step/gui/). PyInstaller entry: [`pyinstaller_entry/run_gui.py`](pyinstaller_entry/run_gui.py).
 
-
-
+Upstream idea and CLI originated with [TheTesla/stl2step](https://github.com/TheTesla/stl2step) by Stefan Helmert.
