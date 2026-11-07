@@ -4,7 +4,7 @@
 
 [tool.poetry]
 name = "stl2step"
-version = "0.0.0+devel"
+version = "0.1.0"
 description = "Non-trivial conversion of STL files into STEP files."
 authors = ["Stefan Helmert <stefan@entroserv.de>"]
 license = "AGPLv3"
